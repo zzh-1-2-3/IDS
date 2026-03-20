@@ -393,6 +393,14 @@ def start_realtime_capture(
                 log_detection(f"开始处理 {len(flows)} 个流量")
                 for idx, flow in enumerate(flows):
                     try:
+                        flow_info = flow.get_flow_info()
+                        src_ip = flow_info['src_ip']
+                        
+                        # 检查IP是否被封禁
+                        if StrategyService.is_ip_blocked(db_thread, src_ip):
+                            log_detection(f"IP {src_ip} 已被封禁，跳过处理")
+                            continue
+                        
                         log_detection(f"处理第 {idx+1}/{len(flows)} 个流量...")
                         features = flow.extract_features()
                         if features:
@@ -401,9 +409,8 @@ def start_realtime_capture(
                             attack_type, confidence, threat_level = model_service.predict(feature_array)
                             log_detection(f"预测结果: {attack_type}, 置信度: {confidence:.4f}, 威胁等级: {threat_level}")
                             
-                            flow_info = flow.get_flow_info()
                             traffic_data = {
-                                "src_ip": flow_info['src_ip'],
+                                "src_ip": src_ip,
                                 "src_port": flow_info['src_port'],
                                 "dst_ip": flow_info['dst_ip'],
                                 "dst_port": flow_info['dst_port'],
@@ -414,17 +421,17 @@ def start_realtime_capture(
                                 "confidence": confidence
                             }
                             TrafficService.create_traffic(db_thread, traffic_data)
-                            log_detection(f"流量数据已保存到数据库: {flow_info['src_ip']}:{flow_info['src_port']} -> {flow_info['dst_ip']}:{flow_info['dst_port']}")
+                            log_detection(f"流量数据已保存到数据库: {src_ip}:{flow_info['src_port']} -> {flow_info['dst_ip']}:{flow_info['dst_port']}")
                             
                             # 自动执行策略
                             strategy_result = StrategyService.auto_execute_strategy(
-                                db_thread, attack_type, threat_level, flow_info['src_ip']
+                                db_thread, attack_type, threat_level, src_ip
                             )
                             response_strategy = strategy_result['strategy_name'] if strategy_result else None
                             
                             # 同时创建检测结果记录
                             detection_data = {
-                                "src_ip": flow_info['src_ip'],
+                                "src_ip": src_ip,
                                 "src_port": flow_info['src_port'],
                                 "dst_ip": flow_info['dst_ip'],
                                 "dst_port": flow_info['dst_port'],
@@ -438,7 +445,7 @@ def start_realtime_capture(
                             DetectionService.create_detection(db_thread, detection_data)
                             log_detection(f"检测结果数据已保存到数据库: {attack_type} (置信度: {confidence:.2f})")
                             
-                            log_detection(f"成功处理流量: {flow_info['src_ip']}:{flow_info['src_port']} -> {flow_info['dst_ip']}:{flow_info['dst_port']} {flow_info['protocol']}")
+                            log_detection(f"成功处理流量: {src_ip}:{flow_info['src_port']} -> {flow_info['dst_ip']}:{flow_info['dst_port']} {flow_info['protocol']}")
                         else:
                             log_detection(f"流量特征提取失败，跳过此流量")
                     except Exception as e:
@@ -464,13 +471,13 @@ def start_realtime_capture(
                     # 获取所有流量
                     flows = capture_service.get_flows()
                     if flows:
-                        # 只处理未处理过的流量
+                        # 只处理未处理过的流量（只要有数据就处理，不限制完成条件）
                         new_flows = []
                         for flow in flows:
                             flow_key = (flow.src_ip, flow.dst_ip, flow.src_port, flow.dst_port, flow.protocol)
                             if flow_key not in processed_flows:
-                                # 只处理已完成的或有足够数据的流量
-                                if flow.is_complete or (flow.fwd_packet_count + flow.bwd_packet_count) >= 5:
+                                # 只要有数据包就处理，不等待流量完成
+                                if (flow.fwd_packet_count + flow.bwd_packet_count) >= 1:
                                     new_flows.append(flow)
                                     processed_flows.add(flow_key)
                         
@@ -505,14 +512,21 @@ def stop_realtime_capture(
         log_detection(f"处理剩余的 {len(flows)} 个流量")
         for flow in flows:
             try:
+                flow_info = flow.get_flow_info()
+                src_ip = flow_info['src_ip']
+                
+                # 检查IP是否被封禁
+                if StrategyService.is_ip_blocked(db, src_ip):
+                    log_detection(f"IP {src_ip} 已被封禁，跳过处理")
+                    continue
+                
                 features = flow.extract_features()
                 if features:
                     feature_array = np.array(list(features.values()))
                     attack_type, confidence, threat_level = model_service.predict(feature_array)
                     
-                    flow_info = flow.get_flow_info()
                     traffic_data = {
-                        "src_ip": flow_info['src_ip'],
+                        "src_ip": src_ip,
                         "src_port": flow_info['src_port'],
                         "dst_ip": flow_info['dst_ip'],
                         "dst_port": flow_info['dst_port'],
@@ -526,13 +540,13 @@ def stop_realtime_capture(
                     
                     # 自动执行策略
                     strategy_result = StrategyService.auto_execute_strategy(
-                        db, attack_type, threat_level, flow_info['src_ip']
+                        db, attack_type, threat_level, src_ip
                     )
                     response_strategy = strategy_result['strategy_name'] if strategy_result else None
                     
                     # 存入检测结果表
                     detection_data = {
-                        "src_ip": flow_info['src_ip'],
+                        "src_ip": src_ip,
                         "src_port": flow_info['src_port'],
                         "dst_ip": flow_info['dst_ip'],
                         "dst_port": flow_info['dst_port'],

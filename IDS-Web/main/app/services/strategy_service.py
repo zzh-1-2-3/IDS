@@ -202,6 +202,19 @@ class StrategyService:
         return db_strategy
     
     @staticmethod
+    def get_action_priority(action):
+        """获取动作的优先级
+        
+        优先级：封禁 > 限流 > 仅告警
+        """
+        priority_map = {
+            "block": 3,    # 封禁优先级最高
+            "throttle": 2, # 限流次之
+            "alert": 1     # 仅告警最低
+        }
+        return priority_map.get(action, 0)
+    
+    @staticmethod
     def execute_adaptive_strategy(db: Session, strategy: AdaptiveStrategy, target_ip: str):
         # 检查策略是否已启用
         if not strategy.is_active:
@@ -216,8 +229,36 @@ class StrategyService:
             )
         ).first()
         
+        # 获取新策略的优先级
+        new_priority = StrategyService.get_action_priority(strategy.action)
+        
         if existing:
-            return None
+            # 获取现有策略的优先级
+            existing_priority = StrategyService.get_action_priority(existing.action)
+            
+            # 只有新策略优先级更高时才更新
+            if new_priority <= existing_priority:
+                log_strategy(f"[策略跳过] 现有策略优先级高于或等于新策略，跳过更新: {existing.action} -> {strategy.action}")
+                return None
+            
+            # 取消现有策略
+            if existing.action == "block":
+                # 取消防禁
+                if StrategyService.get_os_type() == "windows":
+                    subprocess.run(f'netsh advfirewall firewall delete rule name="IDS_Adaptive_Block_{target_ip}"', shell=True)
+                else:
+                    subprocess.run(f'iptables -D INPUT -s {target_ip} -j DROP', shell=True)
+            elif existing.action == "throttle":
+                # 取消限流
+                if StrategyService.get_os_type() == "linux":
+                    # 移除限流规则
+                    subprocess.run(f'iptables -D INPUT -s {target_ip} -m limit --limit {existing.packet_limit}/second -j ACCEPT', shell=True)
+                    subprocess.run(f'iptables -D INPUT -s {target_ip} -j DROP', shell=True)
+            
+            # 标记现有策略为已取消
+            existing.is_cancelled = True
+            db.commit()
+            log_strategy(f"[策略更新] 已取消现有策略: {existing.action}")
         
         # 生成注释
         annotation = f"自适应策略: {strategy.name}, 攻击类型: {strategy.attack_type}, 威胁级别: {strategy.threat_level}"
@@ -340,6 +381,7 @@ class StrategyService:
             executed.is_cancelled = True
             db.commit()
             db.refresh(executed)
+            log_strategy(f"[策略取消] 成功取消策略: {executed.annotation}, 目标IP: {executed.target_ip}")
             return executed
         return None
     
@@ -382,6 +424,28 @@ class StrategyService:
         return None
     
     @staticmethod
+    def is_ip_blocked(db: Session, ip: str):
+        """检查IP是否被封禁
+        
+        Args:
+            db: 数据库会话
+            ip: IP地址
+        
+        Returns:
+            bool: 如果IP被封禁返回True，否则返回False
+        """
+        from app.models.strategy import ExecutedStrategy
+        # 检查是否有未取消的封禁策略
+        blocked = db.query(ExecutedStrategy).filter(
+            and_(
+                ExecutedStrategy.target_ip == ip,
+                ExecutedStrategy.action == "block",
+                ExecutedStrategy.is_cancelled == False
+            )
+        ).first()
+        return blocked is not None
+    
+    @staticmethod
     def auto_execute_strategy(db: Session, attack_type: str, threat_level: str, src_ip: str):
         """自动执行匹配的自适应策略
         
@@ -399,6 +463,11 @@ class StrategyService:
         is_whitelisted = db.query(WhitelistIP).filter(WhitelistIP.ip_address == src_ip).first()
         if is_whitelisted:
             log_strategy(f"[策略跳过] IP {src_ip} 在白名单中，跳过响应策略")
+            return None
+        
+        # 检查IP是否已被封禁
+        if StrategyService.is_ip_blocked(db, src_ip):
+            log_strategy(f"[策略跳过] IP {src_ip} 已被封禁，跳过响应策略")
             return None
         
         # BENIGN类型不执行任何策略

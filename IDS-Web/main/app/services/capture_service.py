@@ -107,8 +107,8 @@ class Flow:
         self.flow_duration = current_time - self.start_time
         self.last_seen = current_time
         
-        # 流量完成条件：持续时间超过10秒或数据包数量超过10个
-        if self.flow_duration > 10 or (self.fwd_packet_count + self.bwd_packet_count) >= 10:
+        # 流量完成条件：持续时间超过3秒或数据包数量超过3个
+        if self.flow_duration > 3 or (self.fwd_packet_count + self.bwd_packet_count) >= 3:
             self.is_complete = True
     
     def is_expired(self, current_time=None):
