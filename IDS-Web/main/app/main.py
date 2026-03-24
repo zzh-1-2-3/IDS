@@ -20,6 +20,7 @@ async def lifespan(app: FastAPI):
     db = SessionLocal()
     try:
         ModelService.reset_all_model_status(db)
+        ModelService.initialize_models_from_directory(db)
     finally:
         db.close()
     yield

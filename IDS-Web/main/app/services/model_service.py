@@ -47,6 +47,77 @@ class ModelService:
         print("已重置所有模型状态为未使用")
     
     @staticmethod
+    def initialize_models_from_directory(db: Session):
+        """从模型目录初始化模型到数据库
+        当系统部署到新环境时，扫描saved_models文件夹中的模型文件并添加到数据库
+        """
+        model_dir = settings.MODEL_DIR
+        if not os.path.exists(model_dir):
+            print(f"模型目录不存在: {model_dir}")
+            return
+        
+        # 获取数据库中已有的模型路径
+        existing_models = db.query(ModelConfig).all()
+        existing_paths = {model.file_path for model in existing_models if model.file_path}
+        
+        # 扫描模型文件
+        for file in os.listdir(model_dir):
+            if file.endswith('.pth'):
+                file_path = os.path.join(model_dir, file)
+                
+                # 跳过已存在的模型
+                if file_path in existing_paths:
+                    continue
+                
+                # 分析模型类型 - 新的命名规则
+                model_type = "cnn"  # 默认类型
+                
+                # 两阶段模型: two_stage_binary_xxx.pth 或 two_stage_attack_xxx.pth
+                if file.lower().startswith("two_stage_binary"):
+                    model_type = "two_stage"
+                    # 检查对应的attack模型是否存在
+                    attack_file = file.replace("two_stage_binary", "two_stage_attack")
+                    attack_path = os.path.join(model_dir, attack_file)
+                    if not os.path.exists(attack_path):
+                        print(f"警告: 两阶段模型缺少attack文件: {attack_file}")
+                elif file.lower().startswith("two_stage_attack"):
+                    # attack模型是两阶段模型的一部分，跳过单独处理
+                    continue
+                # 单阶段二分类模型: binary_xxx.pth
+                elif file.lower().startswith("binary_"):
+                    model_type = "CNN_2"
+                # 单阶段七分类模型: cnn_xxx.pth
+                elif file.lower().startswith("cnn_"):
+                    model_type = "CNN_7"
+                
+                # 分析数据集类型
+                dataset_type = "cicids2017"  # 默认数据集
+                if "custom" in file.lower():
+                    dataset_type = "custom"
+                
+                # 创建模型名称
+                model_name = file.replace('.pth', '')
+                
+                # 创建模型配置
+                config_data = {
+                    "name": model_name,
+                    "model_type": model_type,
+                    "dataset_type": dataset_type,
+                    "file_path": file_path,
+                    "description": f"从目录初始化的模型: {file}",
+                    "is_active": False
+                }
+                
+                # 保存到数据库
+                try:
+                    ModelService.save_model_config(db, config_data)
+                    print(f"已初始化模型: {model_name} (类型: {model_type})")
+                except Exception as e:
+                    print(f"初始化模型失败 {file}: {e}")
+        
+        print("模型目录初始化完成")
+    
+    @staticmethod
     def get_available_models() -> List[dict]:
         """获取所有可用的模型文件"""
         model_dir = settings.MODEL_DIR
@@ -72,6 +143,9 @@ class ModelService:
             if not model_config:
                 return False, "模型不存在"
             
+            # 获取模型名称（用于删除eval_results中的图表）
+            model_name = os.path.basename(model_config.file_path).replace('.pth', '') if model_config.file_path else None
+            
             # 删除模型文件（使用file_path字段）
             if model_config.file_path and os.path.exists(model_config.file_path):
                 os.remove(model_config.file_path)
@@ -81,7 +155,10 @@ class ModelService:
             if model_config.model_type == "two_stage":
                 # 两阶段模型的file_path指向二分类模型，六分类模型路径通过替换名称得到
                 binary_model_path = model_config.file_path
-                attack_model_path = binary_model_path.replace("binary_", "attack_")
+                
+                # 构建attack模型路径和scaler路径
+                attack_model_path = binary_model_path.replace("two_stage_binary", "two_stage_attack")
+                scaler_path = binary_model_path.replace("two_stage_binary", "scaler_two_stage").replace(".pth", ".pkl")
                 
                 if os.path.exists(binary_model_path):
                     os.remove(binary_model_path)
@@ -89,6 +166,47 @@ class ModelService:
                 if os.path.exists(attack_model_path):
                     os.remove(attack_model_path)
                     print(f"删除六分类模型文件: {attack_model_path}")
+                
+                # 删除两阶段模型的scaler文件
+                if os.path.exists(scaler_path):
+                    os.remove(scaler_path)
+                    print(f"删除scaler文件: {scaler_path}")
+            else:
+                # 删除单阶段模型的scaler文件
+                scaler_path = model_config.file_path.replace(".pth", "_scaler.pkl")
+                if os.path.exists(scaler_path):
+                    os.remove(scaler_path)
+                    print(f"删除scaler文件: {scaler_path}")
+            
+            # 删除eval_results中的评估图表
+            if model_name:
+                base_dir = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
+                eval_dir = os.path.join(base_dir, 'eval_results')
+                
+                if os.path.exists(eval_dir):
+                    # 删除与该模型相关的所有图表文件
+                    for file in os.listdir(eval_dir):
+                        if file.startswith(model_name):
+                            file_path = os.path.join(eval_dir, file)
+                            try:
+                                os.remove(file_path)
+                                print(f"删除评估图表: {file_path}")
+                            except Exception as e:
+                                print(f"删除评估图表失败 {file}: {e}")
+                    
+                    # 对于两阶段模型，还需要删除attack相关的图表
+                    if model_config.model_type == "two_stage":
+                        # 构建attack模型名称
+                        attack_model_name = model_name.replace("two_stage_binary", "two_stage_attack")
+                        
+                        for file in os.listdir(eval_dir):
+                            if file.startswith(attack_model_name):
+                                file_path = os.path.join(eval_dir, file)
+                                try:
+                                    os.remove(file_path)
+                                    print(f"删除评估图表: {file_path}")
+                                except Exception as e:
+                                    print(f"删除评估图表失败 {file}: {e}")
             
             # 删除数据库记录
             db.delete(model_config)

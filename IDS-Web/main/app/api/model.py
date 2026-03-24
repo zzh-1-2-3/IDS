@@ -93,10 +93,9 @@ def set_active_model(
         if model.model_type == "two_stage":
             # 加载两阶段模型
             binary_model_path = model.file_path
-            # 构建攻击模型路径（通过替换文件名中的前缀）
-            attack_model_path = binary_model_path.replace("binary_", "attack_")
-            # 构建scaler路径（通过替换文件名和扩展名）
-            scaler_path = binary_model_path.replace("binary_", "scaler_").replace(".pth", ".pkl")
+            # 构建攻击模型路径和scaler路径
+            attack_model_path = binary_model_path.replace("two_stage_binary", "two_stage_attack")
+            scaler_path = binary_model_path.replace("two_stage_binary", "scaler_two_stage").replace(".pth", ".pkl")
             
             # 根据数据集类型确定输入维度
             input_dim = 26  # 默认值
@@ -324,7 +323,7 @@ def train_model_task(history_id: int, params: TrainingParams, db: Session):
             
             # 保存scaler
             scaler_save_path = os.path.join(settings.MODEL_DIR, 
-                                           f"scaler_{params.dataset_type}_{history_id}.pkl")
+                                           f"scaler_two_stage_{params.dataset_type}_{history_id}.pkl")
             import joblib
             joblib.dump(scaler, scaler_save_path)
             print(f"Scaler已保存到: {scaler_save_path}")
@@ -333,11 +332,11 @@ def train_model_task(history_id: int, params: TrainingParams, db: Session):
             binary_model = IDSBinaryClassifier(input_dim=feature_dim)
             attack_model = IDSAttackClassifier(input_dim=feature_dim)
             
-            # 训练两阶段模型
+            # 训练两阶段模型 - 使用two_stage前缀命名
             binary_model_save_path = os.path.join(settings.MODEL_DIR, 
-                                                   f"binary_{params.dataset_type}_{history_id}.pth")
+                                                   f"two_stage_binary_{params.dataset_type}_{history_id}.pth")
             attack_model_save_path = os.path.join(settings.MODEL_DIR, 
-                                                  f"attack_{params.dataset_type}_{history_id}.pth")
+                                                  f"two_stage_attack_{params.dataset_type}_{history_id}.pth")
             
             # 定义进度回调函数
             def progress_callback(stage, current_epoch, total_epochs, progress_percent, loss, accuracy):
